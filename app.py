@@ -218,8 +218,21 @@ class NetworkConfigManager:
     
     def try_scp_restore(self, connection, config_path):
         """Try to restore config using SCP"""
+        scp_was_enabled = False
         try:
             print("Attempting SCP transfer...")
+            
+            # Check if SCP server is already enabled
+            print("Checking SCP server status...")
+            show_run_scp = connection.send_command("show running-config | include ip scp server enable")
+            scp_was_enabled = "ip scp server enable" in show_run_scp
+            
+            if not scp_was_enabled:
+                print("Enabling SCP server temporarily...")
+                connection.send_config_set(["ip scp server enable"])
+                print("✓ SCP server enabled")
+            else:
+                print("✓ SCP server already enabled")
             
             # Create SCP client
             ssh_client = paramiko.SSHClient()
@@ -248,10 +261,27 @@ class NetworkConfigManager:
                 output += connection.send_command_timing("\n")
             
             print("✓ SCP transfer successful!")
+            
+            # Disable SCP server if it wasn't originally enabled (security best practice)
+            if not scp_was_enabled:
+                print("Disabling SCP server for security...")
+                connection.send_config_set(["no ip scp server enable"])
+                print("✓ SCP server disabled")
+            
             return True
             
         except Exception as e:
             print(f"SCP method failed: {str(e)}")
+            
+            # Ensure SCP server is disabled if we enabled it, even on failure
+            if not scp_was_enabled:
+                try:
+                    print("Disabling SCP server after failure...")
+                    connection.send_config_set(["no ip scp server enable"])
+                    print("✓ SCP server disabled")
+                except:
+                    print("⚠️  Warning: Could not disable SCP server. Please disable manually with 'no ip scp server enable'")
+            
             return False
     
     def try_tftp_restore(self, connection, config_path):
@@ -401,9 +431,14 @@ class NetworkConfigManager:
             
             # Verify the operation by checking running config timestamp
             print("\nVerifying configuration update...")
-            show_run_output = connection.send_command("show running-config | include Last configuration change")
-            if show_run_output.strip():
-                print(f"Configuration status: {show_run_output.strip()}")
+            try:
+                show_run_output = connection.send_command("show running-config | include Last")
+                if show_run_output.strip():
+                    print(f"Configuration status: {show_run_output.strip()}")
+                else:
+                    print("Configuration timestamp not available, but copy operation completed.")
+            except:
+                print("Could not verify timestamp, but copy operation completed successfully.")
             
             connection.disconnect()
             return True
