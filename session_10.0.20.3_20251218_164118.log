@@ -1,0 +1,16 @@
+
+Router-core#
+Router-core#terminal width 511
+Router-core#terminal length 0
+Router-core#
+Router-core#copy tftp://10.0.20.104/Router-core_20251218_164119_startup-config.txt startup-config
+Destination filename [startup-config]? startup-config
+Accessing tftp://10.0.20.104/Router-core_20251218_164119_startup-config.txt...
+%Error opening tftp://10.0.20.104/Router-core_20251218_164119_startup-config.txt (No such file or directory)
+Router-core#
+Router-core#show running-config | include ip scp server enable
+ip scp server enable
+Router-core#
+Router-core#configure terminal
+Enter configuration commands, one per line.  End with CNTL/Z.
+Router-core(config)#

@@ -1,0 +1,18 @@
+
+VGW-edit-test#
+VGW-edit-test#ter********l width 511
+VGW-edit-test#ter********l length 0
+VGW-edit-test#
+VGW-edit-test#copy tftp://10.0.20.104/VGW-edit-test_20251218_171338_startup-config.txt startup-config
+Destination filename [startup-config]? startup-config
+Accessing tftp://10.0.20.104/VGW-edit-test_20251218_171338_startup-config.txt...
+%Error opening tftp://10.0.20.104/VGW-edit-test_20251218_171338_startup-config.txt (No such file or directory)
+VGW-edit-test#
+VGW-edit-test#show running-config | include ip scp server enable
+ip scp server enable
+VGW-edit-test#copy startup-config-new startup-config
+Destination filename [startup-config]? 
+[OK]
+4432 bytes copied in 2.440 secs (1816 bytes/sec)
+
+VGW-edit-test#exit

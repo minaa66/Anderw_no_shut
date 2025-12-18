@@ -16,11 +16,16 @@ import paramiko
 from scp import SCPClient
 import socket
 import ipaddress
+import shutil
+import subprocess
+import platform
 
 class NetworkConfigManager:
     def __init__(self):
         self.device_info = {} 
         self.config_filename = None
+        self.tftp_server = None
+        self.tftp_root = None
         self.backup_dir = "config_backups"
         self.ensure_backup_directory()
     
@@ -61,13 +66,21 @@ class NetworkConfigManager:
         enable_prompt = input("Enter enable password (press Enter to use same password): ").strip()
         enable_password = enable_prompt if enable_prompt else password
         
+        # Get TFTP details (optional)
+        print("\n--- TFTP Settings (Optional) ---")
+        print("TFTP is faster and preferred for restoring configurations.")
+        self.tftp_server = input("Enter TFTP Server IP (press Enter to skip/use SCP only): ").strip()
+        
+        if self.tftp_server:
+            self.tftp_root = input("Enter TFTP Root Directory (local path to copy config to, press Enter to skip): ").strip()
+        
         self.device_info = {
             'device_type': 'cisco_ios',  # Will auto-detect later
             'host': ip,
             'username': username,
             'password': password,
             'secret': enable_password,
-            'timeout': 30,
+            'timeout': 60,
             'session_log': f'session_{ip}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         }
         
@@ -91,10 +104,27 @@ class NetworkConfigManager:
         except:
             return "cisco_ios"  # Default fallback
     
+    def check_connectivity(self, host):
+        """Check if host is reachable via ping"""
+        print(f"Checking connectivity to {host}...")
+        param = '-n' if platform.system().lower() == 'windows' else '-c'
+        command = ['ping', param, '1', host]
+        
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def test_connection(self):
         """Test SSH connection to device"""
         print(f"\nTesting connection to {self.device_info['host']}...")
         
+        # First check basic connectivity
+        if not self.check_connectivity(self.device_info['host']):
+            print(f"✗ Device {self.device_info['host']} is not reachable via ping.")
+            return False
+
         try:
             connection = ConnectHandler(**self.device_info)
             
@@ -192,19 +222,32 @@ class NetworkConfigManager:
         print(f"\nRestoring configuration to {self.device_info['host']}...")
         
         try:
-            connection = ConnectHandler(**self.device_info)
+            connection = None
+            # Retry connection logic
+            for attempt in range(3):
+                try:
+                    print(f"Connecting to device (Attempt {attempt+1}/3)...")
+                    connection = ConnectHandler(**self.device_info)
+                    break
+                except Exception as e:
+                    print(f"Connection attempt {attempt+1} failed: {str(e)}")
+                    if attempt < 2:
+                        print("Retrying in 5 seconds...")
+                        time.sleep(5)
+                    else:
+                        raise Exception("Could not establish connection after 3 attempts")
             
             # Read the modified configuration
             with open(config_path, 'r') as f:
                 new_config = f.read()
             
-            # Method 1: Try SCP if available
-            if self.try_scp_restore(connection, config_path):
+            # Method 1: Try TFTP first (faster/preferred if available)
+            if self.try_tftp_restore(connection, config_path):
                 connection.disconnect()
                 return True
             
-            # Method 2: Try TFTP if SCP fails
-            if self.try_tftp_restore(connection, config_path):
+            # Method 2: Try SCP if TFTP fails or is skipped
+            if self.try_scp_restore(connection, config_path):
                 connection.disconnect()
                 return True
             
@@ -286,12 +329,86 @@ class NetworkConfigManager:
     
     def try_tftp_restore(self, connection, config_path):
         """Try to restore config using TFTP"""
+        if not self.tftp_server:
+            print("TFTP server not specified, skipping TFTP method.")
+            return False
+            
         try:
             print("Attempting TFTP transfer...")
             
-            # This would require a TFTP server setup
-            # For now, we'll skip this method
-            print("TFTP method not implemented in this version.")
+            filename = os.path.basename(config_path)
+            
+            # Determine remote path for TFTP
+            remote_path = filename
+            
+            # Copy file to TFTP root if specified
+            if self.tftp_root:
+                try:
+                    dest_path = os.path.join(self.tftp_root, filename)
+                    
+                    # Check if source and destination are the same to avoid WinError 32
+                    if os.path.abspath(config_path) != os.path.abspath(dest_path):
+                        print(f"Copying config to TFTP root: {dest_path}")
+                        shutil.copy2(config_path, dest_path)
+                    else:
+                        print(f"File already in TFTP root: {dest_path}")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not copy file to TFTP root: {str(e)}")
+                    print("Ensure the file is already in the TFTP server's root directory.")
+            else:
+                # If no TFTP root specified, assume we need to provide path relative to where we are running
+                # The file is in config_backups/
+                remote_path = f"config_backups/{filename}"
+            
+            # Construct copy command
+            # copy tftp://<server>/<file> startup-config
+            copy_command = f"copy tftp://{self.tftp_server}/{remote_path} startup-config"
+            print(f"Executing: {copy_command}")
+            
+            # Send copy command and handle prompts dynamically
+            output = connection.send_command_timing(copy_command)
+            
+            # Maximum number of interactions to prevent infinite loops
+            max_loops = 10
+            loops = 0
+            
+            while loops < max_loops:
+                loops += 1
+                
+                # Check if we are done (success or error)
+                if "bytes copied" in output.lower() or "ok" in output.lower() or "copied" in output.lower() or "error" in output.lower() or "fail" in output.lower():
+                    break
+                
+                # Handle prompts
+                if "address or name of remote host" in output.lower():
+                    output += connection.send_command_timing(self.tftp_server)
+                elif "source filename" in output.lower():
+                    output += connection.send_command_timing(remote_path) # Use full remote path if asked
+                elif "destination filename" in output.lower():
+                    output += connection.send_command_timing("\n") # Accept default
+                elif "confirm" in output.lower() or "[confirm]" in output.lower():
+                    output += connection.send_command_timing("\n")
+                elif "overwrite" in output.lower():
+                    output += connection.send_command_timing("\n")
+                else:
+                    # No known prompt found, maybe transfer is just taking time?
+                    # Wait a bit and check output again
+                    time.sleep(2)
+                    new_output = connection.read_channel()
+                    if new_output:
+                        output += new_output
+                    else:
+                        break # No more output, assume done
+            
+            print(f"Transfer output: {output}")
+            
+            # Check for success indicators
+            if "bytes copied" in output.lower() or "ok" in output.lower() or "copied" in output.lower():
+                if "error" not in output.lower() and "fail" not in output.lower():
+                    print("✓ TFTP transfer successful!")
+                    return True
+            
+            print("✗ TFTP transfer failed or status unknown.")
             return False
             
         except Exception as e:
@@ -419,6 +536,11 @@ class NetworkConfigManager:
             # Handle confirmation prompts
             if "confirm" in copy_output.lower() or "[confirm]" in copy_output.lower():
                 print("Confirming copy operation...")
+                copy_output += connection.send_command_timing("\n")
+            
+            # Handle destination filename prompt (some devices ask for this)
+            if "destination filename" in copy_output.lower():
+                print("Accepting default destination filename...")
                 copy_output += connection.send_command_timing("\n")
             
             # Check for any errors in the output
